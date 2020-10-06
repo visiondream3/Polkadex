@@ -210,8 +210,34 @@ decl_module! {
 	        Self::cancel_order_from_orderbook(trader,order_id,trading_pair,converted_price)?;
 	        Ok(Some(0).into())
 	    }
+
+	    #[weight = 10000]
+	    pub fn add_liquidity(origin, trading_pair: T::Hash, input_amount: T::Balance, max_amount: T::Balance, deadline: T::BlockNumber) -> dispatch::DispatchResult {
+            
+	        Ok(())
+	    }
+
+	    #[weight = 10000]
+	    pub fn remove_liquidity(origin, liquidity_tokens: T::Balance,min_base_token: T::Balance, min_quote_token: T::balance,deadline: T::BlockNumber ) -> dispatch::DispatchResult {
+
+	        Ok(())
+	    }
+
+	    #[weight = 10000]
+	    pub fn swap(origin, order_type: SwapOrderType, amount_base_asset: T::Balance, amount_quote_asset: T::Balance, deadline: T::BlockNumber) -> dispatch::DispatchResult{
+
+	        Ok(())
+	    }
     }
 }
+
+#[derive(Encode, Decode, Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
+pub enum SwapOrderType {
+    SwapBid,
+    SwapAsk
+}
+
 
 #[derive(Encode, Decode, Clone, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
