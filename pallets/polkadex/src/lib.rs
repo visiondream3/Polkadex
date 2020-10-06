@@ -229,7 +229,7 @@ decl_module! {
 	    }
 
 	    #[weight = 10000]
-	    pub fn remove_liquidity(origin, trading_pair: T::Hash, liquidity_tokens: T::Balance,min_base_token: T::Balance, min_quote_token: T::balance,deadline: T::BlockNumber ) -> dispatch::DispatchResult {
+	    pub fn remove_liquidity(origin, trading_pair: T::Hash, liquidity_tokens: T::Balance,min_base_token: T::Balance, min_quote_token: T::Balance,deadline: T::BlockNumber ) -> dispatch::DispatchResult {
             ensure!(<frame_system::Module<T>>::block_number()<=deadline, <Error<T>>::DeadLinePassed);
             ensure!(<Orderbooks<T>>::contains_key(&trading_pair), <Error<T>>::InvalidTradingPair);
             let trader = ensure_signed(origin)?;
@@ -444,6 +444,7 @@ impl<T> Default for Orderbook<T> where T: Trait {
             quote_asset_id: 0.into(),
             best_bid_price: FixedU128::from(0),
             best_ask_price: FixedU128::from(0),
+            total_liquidity_tokens: 0.into()
         }
     }
 }
@@ -456,6 +457,7 @@ impl<T> Orderbook<T> where T: Trait {
             quote_asset_id,
             best_bid_price: FixedU128::from(0),
             best_ask_price: FixedU128::from(0),
+            total_liquidity_tokens: 0.into()
         }
     }
 }
@@ -529,18 +531,18 @@ impl<T: Trait> Module<T> {
 
     pub fn add_liquidity_to_swap(trader: T::AccountId, trading_pair: T::Hash, base_amount: T::Balance, quote_amount: T::Balance) {
         let mut orderbook: Orderbook<T> = <Orderbooks<T>>::get(trading_pair);
-        let base_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.base_asset_id, &PALLET_ID);
-        let quote_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.quote_asset_id, &PALLET_ID);
+        let base_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.base_asset_id, &Self::account_id());
+        let quote_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.quote_asset_id, &Self::account_id());
 
-        let liquidity_tokens_minted: T::Balance = base_amount.checked_mul(orderbook.total_liquidity_tokens.checked_div(&base_pool).unwrap()).unwrap();
-        let required_quote_asset: T::Balance = liquidity_tokens_minted.checked_mul(quote_pool.checked_div(&orderbook.total_liquidity_tokens).unwrap()).unwrap();
+        let liquidity_tokens_minted: T::Balance = base_amount.checked_mul(&orderbook.total_liquidity_tokens.checked_div(&base_pool).unwrap()).unwrap();
+        let required_quote_asset: T::Balance = liquidity_tokens_minted.checked_mul(&quote_pool.checked_div(&orderbook.total_liquidity_tokens).unwrap()).unwrap();
         if required_quote_asset >= quote_amount {
             // Add the liquidity shares to user account
             <LiquidityTokens<T>>::insert(&trading_pair, &trader, (<LiquidityTokens<T>>::get(&trading_pair, &trader) + liquidity_tokens_minted));
             orderbook.total_liquidity_tokens = orderbook.total_liquidity_tokens + liquidity_tokens_minted;
             // TODO: Handle the Results
-            pallet_generic_asset::Module::<T>::transfer(&trader, &orderbook.base_asset_id, &PALLET_ID, base_amount);
-            pallet_generic_asset::Module::<T>::transfer(&trader, &orderbook.quote_asset_id, &PALLET_ID, required_quote_asset);
+            pallet_generic_asset::Module::<T>::make_transfer(&orderbook.base_asset_id, &trader, &Self::account_id(), base_amount);
+            pallet_generic_asset::Module::<T>::make_transfer(&orderbook.quote_asset_id, &trader, &Self::account_id(), required_quote_asset);
         } else {
             // TODO: Error Price Slipped too much.
         }
@@ -549,19 +551,19 @@ impl<T: Trait> Module<T> {
 
     pub fn remove_liquidity_from_swap(trader: T::AccountId, trading_pair: T::Hash, liquidity_tokens: T::Balance, min_base_token: T::Balance, min_quote_token: T::Balance) {
         let mut orderbook: Orderbook<T> = <Orderbooks<T>>::get(trading_pair);
-        let base_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.base_asset_id, &PALLET_ID);
-        let quote_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.quote_asset_id, &PALLET_ID);
+        let base_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.base_asset_id, &Self::account_id());
+        let quote_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.quote_asset_id, &Self::account_id());
 
-        let base_asset_out: T::Balance = liquidity_tokens.checked_mul(base_pool.checked_div(orderbook.total_liquidity_tokens).unwrap()).unwrap();
-        let quote_asset_out: T::Balance = liquidity_tokens.checked_mul(quote_pool.checked_div(orderbook.total_liquidity_tokens).unwrap()).unwrap();
+        let base_asset_out: T::Balance = liquidity_tokens.checked_mul(&base_pool.checked_div(&orderbook.total_liquidity_tokens).unwrap()).unwrap();
+        let quote_asset_out: T::Balance = liquidity_tokens.checked_mul(&quote_pool.checked_div(&orderbook.total_liquidity_tokens).unwrap()).unwrap();
 
         if (base_asset_out >= min_base_token) && (quote_asset_out >= min_quote_token) {
             orderbook.total_liquidity_tokens = orderbook.total_liquidity_tokens - liquidity_tokens;
             // Remove the liquidity shares from user account
             <LiquidityTokens<T>>::insert(&trading_pair, &trader, (<LiquidityTokens<T>>::get(&trading_pair, &trader) - liquidity_tokens));
             // TODO: Handle the Results
-            pallet_generic_asset::Module::<T>::transfer(&PALLET_ID, &orderbook.base_asset_id, &trader, base_asset_out);
-            pallet_generic_asset::Module::<T>::transfer(&PALLET_ID, &orderbook.quote_asset_id, &trader, quote_asset_out);
+            pallet_generic_asset::Module::<T>::make_transfer(&orderbook.base_asset_id,&Self::account_id(), &trader, base_asset_out);
+            pallet_generic_asset::Module::<T>::make_transfer(&orderbook.quote_asset_id,&Self::account_id(), &trader, quote_asset_out);
         } else {
             // TODO: Error about Price Slipped too much
         }
@@ -571,35 +573,35 @@ impl<T: Trait> Module<T> {
 
     pub fn swap_tokens(trader: T::AccountId, trading_pair: T::Hash, order_type: SwapOrderType, amount_base_asset: T::Balance, amount_quote_asset: T::Balance) {
         let mut orderbook: Orderbook<T> = <Orderbooks<T>>::get(trading_pair);
-        let base_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.base_asset_id, &PALLET_ID);
-        let quote_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.quote_asset_id, &PALLET_ID);
+        let base_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.base_asset_id, &Self::account_id());
+        let quote_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.quote_asset_id, &Self::account_id());
         match order_type {
             SwapOrderType::SwapBid => {
-                let provider_fee: T::Balance = amount_base_asset.checked_div(1000 as T::Balance).unwrap();
+                let provider_fee: T::Balance = amount_base_asset.checked_div(&1000.into()).unwrap();
                 let exchange_fee: T::Balance = provider_fee.clone();
-                let k: T::Balance = base_pool.checked_mul(quote_pool);
+                let k: T::Balance = base_pool.checked_mul(&quote_pool).unwrap();
                 let new_quote_pool: T::Balance = (k / (base_pool + amount_base_asset - exchange_fee - provider_fee));
                 let quote_out: T::Balance = quote_pool - new_quote_pool;
                 if quote_out >= amount_quote_asset {
                     // TODO: Transfer exchange fee to exchange address
                     // TODO: Handle the Results
-                    pallet_generic_asset::Module::<T>::transfer(&PALLET_ID, &orderbook.quote_asset_id, &trader, quote_out);
-                    pallet_generic_asset::Module::<T>::transfer(&trader, &orderbook.base_asset_id, &PALLET_ID, amount_base_asset);
+                    pallet_generic_asset::Module::<T>::make_transfer(&orderbook.quote_asset_id, &Self::account_id(), &trader, quote_out);
+                    pallet_generic_asset::Module::<T>::make_transfer(&orderbook.base_asset_id, &trader, &Self::account_id(), amount_base_asset);
                 } else {
                     // TODO: Error about price slipped too much
                 }
             }
             SwapOrderType::SwapAsk => {
-                let provider_fee: T::Balance = amount_quote_asset.checked_div(1000 as T::Balance).unwrap();
+                let provider_fee: T::Balance = amount_quote_asset.checked_div(&1000.into()).unwrap();
                 let exchange_fee: T::Balance = provider_fee.clone();
-                let k: T::Balance = base_pool.checked_mul(quote_pool);
+                let k: T::Balance = base_pool.checked_mul(&quote_pool).unwrap();
                 let new_base_pool: T::Balance = (k / (base_pool + amount_quote_asset - exchange_fee - provider_fee));
                 let base_out: T::Balance = base_pool - new_base_pool;
                 if base_out >= amount_base_asset {
                     // TODO: Transfer exchange fee to exchange address
                     // TODO: Handle the Results
-                    pallet_generic_asset::Module::<T>::transfer(&PALLET_ID, &orderbook.base_asset_id, &trader, base_out);
-                    pallet_generic_asset::Module::<T>::transfer(&trader, &orderbook.quote_asset_id, &PALLET_ID, amount_quote_asset);
+                    pallet_generic_asset::Module::<T>::make_transfer(&orderbook.base_asset_id,&Self::account_id(), &trader, base_out);
+                    pallet_generic_asset::Module::<T>::make_transfer(&orderbook.quote_asset_id,&trader, &Self::account_id(), amount_quote_asset);
                 } else {
                     // TODO: Error about price slipped too much
                 }
