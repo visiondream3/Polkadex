@@ -9,6 +9,7 @@ use pallet_generic_asset::AssetIdProvider;
 use serde::{Deserialize, Serialize};
 use sp_arithmetic::{FixedPointNumber, FixedU128};
 use sp_arithmetic::traits::{CheckedAdd, CheckedDiv, CheckedMul, CheckedSub, UniqueSaturatedFrom};
+use sp_runtime::{ModuleId, traits::AccountIdConversion};
 use sp_runtime::traits::Hash;
 use sp_std::collections::vec_deque::VecDeque;
 use sp_std::convert::TryInto;
@@ -87,6 +88,8 @@ decl_error! {
 		InvalidOrderID,
 		///Price or Quantity too low
 		PriceOrQuantityTooLow,
+		/// Deadline passed for Swap
+		DeadLinePassed,
 	}
 }
 
@@ -108,6 +111,11 @@ decl_storage! {
 	/// Store MarketData of TradingPairs
 	MarketInfo get(fn get_marketdata): double_map hasher(identity) T::Hash, hasher(blake2_128_concat) T::BlockNumber => MarketData;
 	Nonce: u128;
+
+	// Storage related to Polkadex Swap
+	/// Store Liquidity tokens for each trading pairs and users
+	/// key1= tradingPair, key2= AccountID => Balance
+	LiquidityTokens get(fn get_liquidity_tokens): double_map hasher(identity) T::Hash, hasher(blake2_128_concat) T::AccountId => T::Balance;
 	}
 }
 
@@ -212,20 +220,29 @@ decl_module! {
 	    }
 
 	    #[weight = 10000]
-	    pub fn add_liquidity(origin, trading_pair: T::Hash, input_amount: T::Balance, max_amount: T::Balance, deadline: T::BlockNumber) -> dispatch::DispatchResult {
-            
+	    pub fn add_liquidity(origin, trading_pair: T::Hash, base_amount: T::Balance, max_quote_amount: T::Balance, deadline: T::BlockNumber) -> dispatch::DispatchResult {
+            ensure!(<frame_system::Module<T>>::block_number()<=deadline, <Error<T>>::DeadLinePassed);
+            ensure!(<Orderbooks<T>>::contains_key(&trading_pair), <Error<T>>::InvalidTradingPair);
+            let trader = ensure_signed(origin)?;
+            Self::add_liquidity_to_swap(trader,trading_pair,base_amount,max_quote_amount);
 	        Ok(())
 	    }
 
 	    #[weight = 10000]
-	    pub fn remove_liquidity(origin, liquidity_tokens: T::Balance,min_base_token: T::Balance, min_quote_token: T::balance,deadline: T::BlockNumber ) -> dispatch::DispatchResult {
-
+	    pub fn remove_liquidity(origin, trading_pair: T::Hash, liquidity_tokens: T::Balance,min_base_token: T::Balance, min_quote_token: T::balance,deadline: T::BlockNumber ) -> dispatch::DispatchResult {
+            ensure!(<frame_system::Module<T>>::block_number()<=deadline, <Error<T>>::DeadLinePassed);
+            ensure!(<Orderbooks<T>>::contains_key(&trading_pair), <Error<T>>::InvalidTradingPair);
+            let trader = ensure_signed(origin)?;
+            Self::remove_liquidity_from_swap(trader, trading_pair, liquidity_tokens,min_base_token, min_quote_token);
 	        Ok(())
 	    }
 
 	    #[weight = 10000]
-	    pub fn swap(origin, order_type: SwapOrderType, amount_base_asset: T::Balance, amount_quote_asset: T::Balance, deadline: T::BlockNumber) -> dispatch::DispatchResult{
-
+	    pub fn swap(origin, trading_pair: T::Hash, order_type: SwapOrderType, amount_base_asset: T::Balance, amount_quote_asset: T::Balance, deadline: T::BlockNumber) -> dispatch::DispatchResult{
+            ensure!(<frame_system::Module<T>>::block_number()<=deadline, <Error<T>>::DeadLinePassed);
+            ensure!(<Orderbooks<T>>::contains_key(&trading_pair), <Error<T>>::InvalidTradingPair);
+            let trader = ensure_signed(origin)?;
+            Self::swap_tokens(trader, trading_pair, order_type, amount_base_asset, amount_quote_asset);
 	        Ok(())
 	    }
     }
@@ -235,7 +252,7 @@ decl_module! {
 #[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 pub enum SwapOrderType {
     SwapBid,
-    SwapAsk
+    SwapAsk,
 }
 
 
@@ -384,6 +401,7 @@ pub struct Orderbook<T> where T: Trait {
     quote_asset_id: T::AssetId,
     best_bid_price: FixedU128,
     best_ask_price: FixedU128,
+    total_liquidity_tokens: T::Balance,
 }
 
 impl<T> Orderbook<T> where T: Trait {
@@ -501,7 +519,94 @@ pub struct MarketDataRpc {
     volume: Vec<u8>,
 }
 
+const PALLET_ID: ModuleId = ModuleId(*b"POLKADEX");
+
 impl<T: Trait> Module<T> {
+    /// The account ID that holds the Polkadex's Swap funds
+    pub fn account_id() -> T::AccountId {
+        PALLET_ID.into_account()
+    }
+
+    pub fn add_liquidity_to_swap(trader: T::AccountId, trading_pair: T::Hash, base_amount: T::Balance, quote_amount: T::Balance) {
+        let mut orderbook: Orderbook<T> = <Orderbooks<T>>::get(trading_pair);
+        let base_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.base_asset_id, &PALLET_ID);
+        let quote_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.quote_asset_id, &PALLET_ID);
+
+        let liquidity_tokens_minted: T::Balance = base_amount.checked_mul(orderbook.total_liquidity_tokens.checked_div(&base_pool).unwrap()).unwrap();
+        let required_quote_asset: T::Balance = liquidity_tokens_minted.checked_mul(quote_pool.checked_div(&orderbook.total_liquidity_tokens).unwrap()).unwrap();
+        if required_quote_asset >= quote_amount {
+            // Add the liquidity shares to user account
+            <LiquidityTokens<T>>::insert(&trading_pair, &trader, (<LiquidityTokens<T>>::get(&trading_pair, &trader) + liquidity_tokens_minted));
+            orderbook.total_liquidity_tokens = orderbook.total_liquidity_tokens + liquidity_tokens_minted;
+            // TODO: Handle the Results
+            pallet_generic_asset::Module::<T>::transfer(&trader, &orderbook.base_asset_id, &PALLET_ID, base_amount);
+            pallet_generic_asset::Module::<T>::transfer(&trader, &orderbook.quote_asset_id, &PALLET_ID, required_quote_asset);
+        } else {
+            // TODO: Error Price Slipped too much.
+        }
+        <Orderbooks<T>>::insert(trading_pair, orderbook);
+    }
+
+    pub fn remove_liquidity_from_swap(trader: T::AccountId, trading_pair: T::Hash, liquidity_tokens: T::Balance, min_base_token: T::Balance, min_quote_token: T::Balance) {
+        let mut orderbook: Orderbook<T> = <Orderbooks<T>>::get(trading_pair);
+        let base_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.base_asset_id, &PALLET_ID);
+        let quote_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.quote_asset_id, &PALLET_ID);
+
+        let base_asset_out: T::Balance = liquidity_tokens.checked_mul(base_pool.checked_div(orderbook.total_liquidity_tokens).unwrap()).unwrap();
+        let quote_asset_out: T::Balance = liquidity_tokens.checked_mul(quote_pool.checked_div(orderbook.total_liquidity_tokens).unwrap()).unwrap();
+
+        if (base_asset_out >= min_base_token) && (quote_asset_out >= min_quote_token) {
+            orderbook.total_liquidity_tokens = orderbook.total_liquidity_tokens - liquidity_tokens;
+            // Remove the liquidity shares from user account
+            <LiquidityTokens<T>>::insert(&trading_pair, &trader, (<LiquidityTokens<T>>::get(&trading_pair, &trader) - liquidity_tokens));
+            // TODO: Handle the Results
+            pallet_generic_asset::Module::<T>::transfer(&PALLET_ID, &orderbook.base_asset_id, &trader, base_asset_out);
+            pallet_generic_asset::Module::<T>::transfer(&PALLET_ID, &orderbook.quote_asset_id, &trader, quote_asset_out);
+        } else {
+            // TODO: Error about Price Slipped too much
+        }
+
+        <Orderbooks<T>>::insert(trading_pair, orderbook);
+    }
+
+    pub fn swap_tokens(trader: T::AccountId, trading_pair: T::Hash, order_type: SwapOrderType, amount_base_asset: T::Balance, amount_quote_asset: T::Balance) {
+        let mut orderbook: Orderbook<T> = <Orderbooks<T>>::get(trading_pair);
+        let base_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.base_asset_id, &PALLET_ID);
+        let quote_pool: T::Balance = pallet_generic_asset::Module::<T>::free_balance(&orderbook.quote_asset_id, &PALLET_ID);
+        match order_type {
+            SwapOrderType::SwapBid => {
+                let provider_fee: T::Balance = amount_base_asset.checked_div(1000 as T::Balance).unwrap();
+                let exchange_fee: T::Balance = provider_fee.clone();
+                let k: T::Balance = base_pool.checked_mul(quote_pool);
+                let new_quote_pool: T::Balance = (k / (base_pool + amount_base_asset - exchange_fee - provider_fee));
+                let quote_out: T::Balance = quote_pool - new_quote_pool;
+                if quote_out >= amount_quote_asset {
+                    // TODO: Transfer exchange fee to exchange address
+                    // TODO: Handle the Results
+                    pallet_generic_asset::Module::<T>::transfer(&PALLET_ID, &orderbook.quote_asset_id, &trader, quote_out);
+                    pallet_generic_asset::Module::<T>::transfer(&trader, &orderbook.base_asset_id, &PALLET_ID, amount_base_asset);
+                } else {
+                    // TODO: Error about price slipped too much
+                }
+            }
+            SwapOrderType::SwapAsk => {
+                let provider_fee: T::Balance = amount_quote_asset.checked_div(1000 as T::Balance).unwrap();
+                let exchange_fee: T::Balance = provider_fee.clone();
+                let k: T::Balance = base_pool.checked_mul(quote_pool);
+                let new_base_pool: T::Balance = (k / (base_pool + amount_quote_asset - exchange_fee - provider_fee));
+                let base_out: T::Balance = base_pool - new_base_pool;
+                if base_out >= amount_base_asset {
+                    // TODO: Transfer exchange fee to exchange address
+                    // TODO: Handle the Results
+                    pallet_generic_asset::Module::<T>::transfer(&PALLET_ID, &orderbook.base_asset_id, &trader, base_out);
+                    pallet_generic_asset::Module::<T>::transfer(&trader, &orderbook.quote_asset_id, &PALLET_ID, amount_quote_asset);
+                } else {
+                    // TODO: Error about price slipped too much
+                }
+            }
+        }
+    }
+
     /// This is a helper function for "Get Ask Level API".
     /// # Arguments
     ///
@@ -510,7 +615,6 @@ impl<T: Trait> Module<T> {
     /// # Return
     ///
     ///  This function returns List of Ask Level otherwise Related Error.
-
     pub fn get_ask_level(trading_pair: T::Hash) -> Result<Vec<FixedU128>, ErrorRpc> {
         let ask_level = <AsksLevels<T>>::get(trading_pair);
         Ok(ask_level)
