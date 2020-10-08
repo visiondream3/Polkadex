@@ -1,6 +1,6 @@
 ../target/release/node-polkadex \
   --base-path /tmp/alice \
-  --chain local \
+  --chain customSpecRaw.json \
   --alice \
   --port 30333 \
   --ws-port 9944 \

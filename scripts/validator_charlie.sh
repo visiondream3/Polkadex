@@ -1,6 +1,6 @@
 ../target/release/node-polkadex \
   --base-path /tmp/bob \
-  --chain local \
+  --chain customSpecRaw.json \
   --charlie \
   --port 30334 \
   --ws-port 9945 \
