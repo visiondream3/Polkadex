@@ -1,4 +1,4 @@
-./target/release/node-polkadex \
+../target/release/node-polkadex \
   --base-path /tmp/bob \
   --chain local \
   --dave \
