@@ -7,5 +7,4 @@ members = [
     'pallets/polkadex',
     'runtime',
     'pallets/polkadex/runtime-api',
-
 ]
